@@ -52,7 +52,9 @@ public class WalletInitializationService {
                 addressManagementService.generateRootAddress();
                 System.out.println("✅ Root地址已自动生成");
             } else {
-                System.out.println("✅ Root地址配置检查通过:"+hdWalletManager.deriveRootAddress(1));
+                // 获取当前网络的coin_type (测试网=1, 主网=0)
+                int coinType = hdWalletManager.getNetwork().equals("mainnet") ? 0 : 1;
+                System.out.println("✅ Root地址配置检查通过: " + hdWalletManager.deriveRootAddress(coinType));
             }
             
             System.out.println("🎉 钱包初始化完成!");

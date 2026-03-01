@@ -24,7 +24,10 @@ public class BtcAddress {
     private String address;
     
     /**
-     * 地址类型：USER(用户充值地址)、HOT_WALLET(热钱包地址)、INTERNAL(内部查看地址)
+     * 地址类型：ROOT(热钱包地址)、USER(用户充值地址)、INTERNAL(内部查看地址)
+     * ROOT地址: 热钱包主地址，BIP44路径为 m/44'/coin_type'/0'/0/0
+     *          测试网路径: m/44'/1'/0'/0/0 (coin_type=1)
+     *          主网路径: m/44'/0'/0'/0/0 (coin_type=0)
      */
     @Enumerated(EnumType.STRING)
     @Column(name = "address_type", nullable = false)
@@ -106,7 +109,20 @@ public class BtcAddress {
     }
     
     public enum AddressType {
-        ROOT,       // 根地址（系统主地址，也作为热钱包地址使用）
+        /**
+         * ROOT 类型地址是热钱包主地址，根据 BIP44 标准生成：
+         *
+         * - __测试网路径__: `m/44'/1'/0'/0/0` (coin_type=1)
+         * - __主网路径__: `m/44'/0'/0'/0/0` (coin_type=0)
+         *
+         * 路径结构：`m/44'/coin_type'/account'/change/address_index`
+         *
+         * - coin_type: 1(测试网) 或 0(主网)
+         * - account: 0
+         * - change: 0
+         * - address_index: 0
+         */
+        ROOT,       // 热钱包地址（root 私钥生成的 testnet 路径为1 0 0 0 mainnet 为 0 0 0 0）
         USER,       // 用户充值地址
         INTERNAL    // 内部查看地址
     }

@@ -456,7 +456,6 @@ public class HDWalletManager {
         try {
             // 创建HDWalletManager实例
             HDWalletManager walletManager = new HDWalletManager();
-            walletManager.network = "testnet";
             walletManager.initializeNetwork();
             
             // 测试用的种子（从配置文件读取）
@@ -472,9 +471,9 @@ public class HDWalletManager {
 
             // 测试获取私钥
             System.out.println("\n2. 测试获取私钥:");
-            String privateKeyHex = walletManager.getPrivateKeyHex(rootKey);
+//            String privateKeyHex = walletManager.getPrivateKeyHex(rootKey);
             String privateKeyWIF = walletManager.getPrivateKeyWIF(rootKey);
-            System.out.println("   私钥(Hex): " + privateKeyHex);
+//            System.out.println("   私钥(Hex): " + privateKeyHex);
             System.out.println("   私钥(WIF): " + privateKeyWIF);
             
             // 测试获取公钥
