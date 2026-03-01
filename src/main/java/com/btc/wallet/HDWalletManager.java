@@ -1,48 +1,33 @@
 package com.btc.wallet;
 
-import com.btc.entity.BtcWalletSeed;
-import com.btc.repository.BtcWalletSeedRepository;
 import org.bitcoinj.core.NetworkParameters;
 import org.bitcoinj.crypto.DeterministicKey;
 import org.bitcoinj.crypto.HDKeyDerivation;
 import org.bitcoinj.params.MainNetParams;
 import org.bitcoinj.params.TestNet3Params;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import javax.crypto.Cipher;
-import javax.crypto.SecretKey;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.Base64;
 
 /**
  * HD钱包管理器 - 实现BIP32/BIP44标准
- * 生产环境实现：种子加密存储到数据库
+ * 简化版本：种子从配置文件读取
  */
 @Component
 public class HDWalletManager {
     
-    @Autowired
-    private BtcWalletSeedRepository walletSeedRepository;
+    @Value("${bitcoin.wallet.seed:}")
+    private String configSeed;  // 从配置文件读取的种子（十六进制）
     
-    private String encryptionPassword = "default_wallet_password";  // 默认加密密码
+    @Value("${bitcoin.network:testnet}")
+    private String network;  // 网络类型
     
-    private String network = "testnet";  // 默认测试网
-    
-    private byte[] originalSeed;  // 保存原始种子，用于持久化
     private DeterministicKey rootKey;
     private NetworkParameters networkParams;
-    private SecretKey encryptionKey;
-    
-    private static final String ENCRYPTION_ALGORITHM = "AES/GCM/NoPadding";
-    private static final int GCM_IV_LENGTH = 12;
-    private static final int GCM_TAG_LENGTH = 16;
-    private static final String DEFAULT_WALLET_ID = "primary_wallet";
     
     /**
      * 初始化网络参数
@@ -64,20 +49,28 @@ public class HDWalletManager {
     }
     
     /**
-     * 初始化加密密钥
+     * 从配置文件加载钱包
+     * @return 是否加载成功
      */
-    private void initializeEncryptionKey() {
+    public boolean loadWalletFromStorage() {
         try {
-            if (encryptionPassword == null) {
-                encryptionPassword = "default_wallet_password";
+            if (networkParams == null) {
+                initializeNetwork();
             }
             
-            byte[] passwordBytes = encryptionPassword.getBytes(StandardCharsets.UTF_8);
-            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-            byte[] keyBytes = sha256.digest(passwordBytes);
-            this.encryptionKey = new SecretKeySpec(keyBytes, "AES");
+            // 从配置文件读取种子
+            if (configSeed != null && !configSeed.isEmpty()) {
+                byte[] seed = hexToBytes(configSeed);
+                this.rootKey = HDKeyDerivation.createMasterPrivateKey(seed);
+                System.out.println("✅ 从配置文件加载钱包成功");
+                return true;
+            }
+            
+            System.err.println("配置文件中未找到钱包种子");
+            return false;
         } catch (Exception e) {
-            throw new RuntimeException("初始化加密密钥失败", e);
+            System.err.println("加载钱包失败: " + e.getMessage());
+            return false;
         }
     }
     
@@ -87,10 +80,6 @@ public class HDWalletManager {
      */
     public void generateNewWallet() {
         try {
-            if (encryptionKey == null) {
-                initializeEncryptionKey();
-            }
-            
             if (networkParams == null) {
                 initializeNetwork();
             }
@@ -100,47 +89,16 @@ public class HDWalletManager {
             byte[] seed = new byte[32];
             secureRandom.nextBytes(seed);
             
-            // 保存原始种子
-            this.originalSeed = seed.clone();
-            
             // 使用HMAC-SHA512生成根私钥
             this.rootKey = HDKeyDerivation.createMasterPrivateKey(seed);
             
+            // 输出种子供配置使用
             System.out.println("✅ 新HD钱包生成成功");
+            System.out.println("种子(Hex): " + bytesToHex(seed));
+            System.out.println("请将种子配置到 application.yml 中: bitcoin.wallet.seed: " + bytesToHex(seed));
             
         } catch (Exception e) {
             throw new RuntimeException("生成HD钱包失败", e);
-        }
-    }
-    
-    /**
-     * 从加密存储加载钱包
-     */
-    public boolean loadWalletFromStorage() {
-        try {
-            if (encryptionKey == null) {
-                initializeEncryptionKey();
-            }
-            
-            if (networkParams == null) {
-                initializeNetwork();
-            }
-            
-            // 从数据库加载加密的种子数据
-            String encryptedSeed = loadEncryptedSeedFromStorage();
-            if (encryptedSeed != null) {
-                byte[] seed = decryptSeed(encryptedSeed);
-                // 保存原始种子
-                this.originalSeed = seed.clone();
-                // 使用种子重建根私钥
-                this.rootKey = HDKeyDerivation.createMasterPrivateKey(seed);
-                System.out.println("✅ 从数据库加载钱包成功");
-                return true;
-            }
-            return false;
-        } catch (Exception e) {
-            System.err.println("加载钱包失败: " + e.getMessage());
-            return false;
         }
     }
     
@@ -158,7 +116,7 @@ public class HDWalletManager {
         DeterministicKey accountKey = HDKeyDerivation.deriveChildKey(coinTypeKey, account | 0x80000000);
         DeterministicKey changeKey = HDKeyDerivation.deriveChildKey(accountKey, change);
         DeterministicKey addressKey = HDKeyDerivation.deriveChildKey(changeKey, addressIndex);
-        
+
         return encodeBech32Address(addressKey.getPubKeyHash(), getHrpPrefix());
     }
     
@@ -213,115 +171,6 @@ public class HDWalletManager {
     }
     
     /**
-     * 加密种子数据
-     */
-    private String encryptSeed(byte[] seed) {
-        try {
-            Cipher cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM);
-            byte[] iv = new byte[GCM_IV_LENGTH];
-            new SecureRandom().nextBytes(iv);
-            
-            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH * 8, iv);
-            cipher.init(Cipher.ENCRYPT_MODE, encryptionKey, spec);
-            
-            byte[] encryptedData = cipher.doFinal(seed);
-            byte[] result = new byte[iv.length + encryptedData.length];
-            System.arraycopy(iv, 0, result, 0, iv.length);
-            System.arraycopy(encryptedData, 0, result, iv.length, encryptedData.length);
-            
-            return Base64.getEncoder().encodeToString(result);
-        } catch (Exception e) {
-            throw new RuntimeException("种子加密失败", e);
-        }
-    }
-    
-    /**
-     * 解密种子数据
-     */
-    private byte[] decryptSeed(String encryptedSeed) {
-        try {
-            byte[] data = Base64.getDecoder().decode(encryptedSeed);
-            byte[] iv = Arrays.copyOfRange(data, 0, GCM_IV_LENGTH);
-            byte[] encryptedData = Arrays.copyOfRange(data, GCM_IV_LENGTH, data.length);
-            
-            Cipher cipher = Cipher.getInstance(ENCRYPTION_ALGORITHM);
-            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH * 8, iv);
-            cipher.init(Cipher.DECRYPT_MODE, encryptionKey, spec);
-            
-            return cipher.doFinal(encryptedData);
-        } catch (Exception e) {
-            throw new RuntimeException("种子解密失败", e);
-        }
-    }
-    
-    /**
-     * 保存钱包到加密存储
-     * 保存原始种子，而不是私钥字节
-     */
-    public void saveWalletToStorage() {
-        if (originalSeed == null) {
-            throw new IllegalStateException("钱包种子未初始化");
-        }
-        
-        try {
-            String encryptedSeed = encryptSeed(originalSeed);
-            saveEncryptedSeedToStorage(encryptedSeed);
-            System.out.println("✅ 钱包已加密保存");
-        } catch (Exception e) {
-            throw new RuntimeException("保存钱包失败", e);
-        }
-    }
-    
-    /**
-     * 从数据库加载加密种子
-     */
-    private String loadEncryptedSeedFromStorage() {
-        try {
-            return walletSeedRepository.findByPrimaryTrueAndActiveTrueAndNetwork(network)
-                    .map(BtcWalletSeed::getEncryptedSeed)
-                    .orElse(null);
-        } catch (Exception e) {
-            System.err.println("从数据库加载钱包种子失败: " + e.getMessage());
-            return null;
-        }
-    }
-    
-    /**
-     * 保存加密种子到数据库
-     */
-    private void saveEncryptedSeedToStorage(String encryptedSeed) {
-        try {
-            BtcWalletSeed walletSeed = walletSeedRepository
-                    .findByPrimaryTrueAndActiveTrueAndNetwork(network)
-                    .orElse(new BtcWalletSeed());
-            
-            walletSeed.setWalletId(DEFAULT_WALLET_ID + "_" + network);
-            walletSeed.setEncryptedSeed(encryptedSeed);
-            walletSeed.setEncryptionIv("auto");
-            walletSeed.setNetwork(network);
-            walletSeed.setPrimary(true);
-            walletSeed.setActive(true);
-            
-            walletSeedRepository.save(walletSeed);
-            System.out.println("✅ 钱包种子已保存到数据库");
-        } catch (Exception e) {
-            System.err.println("保存钱包种子到数据库失败: " + e.getMessage());
-            throw new RuntimeException("保存钱包种子失败", e);
-        }
-    }
-    
-    /**
-     * 检查数据库中是否存在钱包
-     */
-    public boolean hasWalletInStorage() {
-        try {
-            return walletSeedRepository.existsByPrimaryTrueAndActiveTrue();
-        } catch (Exception e) {
-            return false;
-        }
-    }
-    
-    /**
      * 获取币种对应的coin_type
      */
     public int getCoinType(String coinSymbol) {
@@ -359,19 +208,13 @@ public class HDWalletManager {
         }
         
         boolean isMainnet = network.equals("mainnet");
-        
-        switch (coinSymbol.toLowerCase()) {
-            case "btc":
-                return isMainnet ? "bc" : "tb";
-            case "ltc":
-                return isMainnet ? "lt" : "tlt";
-            case "dash":
-                return isMainnet ? "dash" : "tdash";
-            case "doge":
-                return isMainnet ? "doge" : "tdge";
-            default:
-                return isMainnet ? "bc" : "tb";
-        }
+
+        return switch (coinSymbol.toLowerCase()) {
+            case "ltc" -> isMainnet ? "lt" : "tlt";
+            case "dash" -> isMainnet ? "dash" : "tdash";
+            case "doge" -> isMainnet ? "doge" : "tdge";
+            default -> isMainnet ? "bc" : "tb";
+        };
     }
     
     /**
@@ -436,7 +279,7 @@ public class HDWalletManager {
             result[index++] = (buffer << (5 - bufferBits)) & 0x1F;
         }
         
-        return java.util.Arrays.copyOf(result, index);
+        return Arrays.copyOf(result, index);
     }
     
     /**
@@ -505,5 +348,155 @@ public class HDWalletManager {
     
     public NetworkParameters getNetworkParameters() {
         return networkParams;
+    }
+    
+    /**
+     * 通过DeterministicKey获取私钥（十六进制字符串）
+     */
+    public String getPrivateKeyHex(DeterministicKey key) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        byte[] privateKeyBytes = key.getPrivKeyBytes();
+        if (privateKeyBytes == null) {
+            throw new IllegalArgumentException("该key不包含私钥信息");
+        }
+        return bytesToHex(privateKeyBytes);
+    }
+    
+    /**
+     * 通过DeterministicKey获取私钥（WIF格式）
+     */
+    public String getPrivateKeyWIF(DeterministicKey key) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        if (networkParams == null) {
+            initializeNetwork();
+        }
+        return key.getPrivateKeyAsWiF(networkParams);
+    }
+    
+    /**
+     * 通过DeterministicKey获取公钥（十六进制字符串）
+     */
+    public String getPublicKeyHex(DeterministicKey key) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        byte[] publicKeyBytes = key.getPubKey();
+        return bytesToHex(publicKeyBytes);
+    }
+    
+    /**
+     * 通过DeterministicKey获取公钥（压缩格式）
+     */
+    public String getCompressedPublicKeyHex(DeterministicKey key) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        byte[] compressedPubKey = key.getPubKeyPoint().getEncoded(true);
+        return bytesToHex(compressedPubKey);
+    }
+    
+    /**
+     * 通过DeterministicKey获取地址（Bech32/Native SegWit格式）
+     */
+    public String getAddress(DeterministicKey key) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        return encodeBech32Address(key.getPubKeyHash(), getHrpPrefix());
+    }
+    
+    /**
+     * 通过DeterministicKey获取地址（指定币种）
+     */
+    public String getAddress(DeterministicKey key, String coinSymbol) {
+        if (key == null) {
+            throw new IllegalArgumentException("DeterministicKey不能为null");
+        }
+        return encodeBech32Address(key.getPubKeyHash(), getHrpPrefix(coinSymbol));
+    }
+    
+    /**
+     * 字节数组转十六进制字符串
+     */
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b & 0xFF));
+        }
+        return sb.toString();
+    }
+    
+    /**
+     * 十六进制字符串转字节数组
+     */
+    private byte[] hexToBytes(String hex) {
+        if (hex == null || hex.isEmpty()) {
+            throw new IllegalArgumentException("十六进制字符串不能为空");
+        }
+        if (hex.length() % 2 != 0) {
+            hex = "0" + hex;  // 补齐
+        }
+        byte[] bytes = new byte[hex.length() / 2];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        }
+        return bytes;
+    }
+    
+    /**
+     * 测试主方法
+     */
+    public static void main(String[] args) {
+        System.out.println("========== HDWalletManager 密钥测试 ==========\n");
+        
+        try {
+            // 创建HDWalletManager实例
+            HDWalletManager walletManager = new HDWalletManager();
+            walletManager.network = "testnet";
+            walletManager.initializeNetwork();
+            
+            // 测试用的种子（从配置文件读取）
+            String testSeed = "30919cf1818b1ca23b46dd3a9df8503652d0bf046ded7dd6f57cfd6db2283699";
+            walletManager.configSeed = testSeed;
+            
+            // 从配置加载钱包
+            System.out.println("1. 从配置文件加载钱包...");
+            walletManager.loadWalletFromStorage();
+            
+            DeterministicKey rootKey = walletManager.getRootKey();
+            System.out.println("\n========== 根密钥信息 ==========");
+
+            // 测试获取私钥
+            System.out.println("\n2. 测试获取私钥:");
+            String privateKeyHex = walletManager.getPrivateKeyHex(rootKey);
+            String privateKeyWIF = walletManager.getPrivateKeyWIF(rootKey);
+            System.out.println("   私钥(Hex): " + privateKeyHex);
+            System.out.println("   私钥(WIF): " + privateKeyWIF);
+            
+            // 测试获取公钥
+            System.out.println("\n3. 测试获取公钥:");
+            String compressedPubKey = walletManager.getCompressedPublicKeyHex(rootKey);
+            System.out.println("   公钥(Hex-压缩): " + compressedPubKey);
+            
+            // 测试获取地址
+            System.out.println("\n4. 测试获取地址:");
+            String address = walletManager.getAddress(rootKey);
+            System.out.println("   根私钥地址(Bech32): " + address);
+            
+            // 测试派生地址
+            System.out.println("\n========== 派生地址测试 ==========");
+            String derivedAddress = walletManager.deriveRootAddress(1);  // BTC测试网 coin_type=1
+            System.out.println("   派生地址 m/44'/1'/0'/0/0: " + derivedAddress);
+            
+            System.out.println("\n========== 测试完成 ==========");
+            
+        } catch (Exception e) {
+            System.err.println("测试失败: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 }

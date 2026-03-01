@@ -33,6 +33,8 @@ spring:
 # Bitcoin配置
 bitcoin:
   network: testnet  # mainnet, testnet, regtest
+  wallet:
+    seed: 30919cf1818b1ca23b46dd3a9df8503652d0bf046ded7dd6f57cfd6db2283699  # HD钱包种子（十六进制）
   # 主网/测试网一键切换开关
   network-switch:
     enabled: true  # 是否启用网络切换功能

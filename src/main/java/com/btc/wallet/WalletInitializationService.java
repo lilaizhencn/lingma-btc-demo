@@ -35,15 +35,15 @@ public class WalletInitializationService {
         networkSwitchService.initialize();
         
         try {
-            // 1. 首先尝试加载现有钱包（钱包必须在生成地址之前初始化）
+            // 1. 从配置文件加载钱包种子（钱包必须在生成地址之前初始化）
             if (hdWalletManager.loadWalletFromStorage()) {
-                System.out.println("✅ 现有钱包加载成功");
+                System.out.println("✅ 钱包从配置文件加载成功");
             } else {
-                // 生成新的钱包
-                System.out.println("⚠️ 未找到现有钱包，请配置...");
+                // 配置文件中没有种子，生成新的钱包供用户配置
+                System.out.println("⚠️ 配置文件中未找到钱包种子，正在生成新钱包...");
                 hdWalletManager.generateNewWallet();
-                hdWalletManager.saveWalletToStorage();
-                System.out.println("✅ 新钱包生成并保存成功");
+                System.out.println("⚠️ 请将上述种子配置到 application.yml 的 bitcoin.wallet.seed 中后重启应用");
+                throw new RuntimeException("请在配置文件中设置钱包种子后重启应用");
             }
             
             // 2. 钱包初始化完成后，检查并生成Root地址
