@@ -1,0 +1,111 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: btc-backend-service
+  
+  datasource:
+    # 使用H2内存数据库进行测试
+    url: jdbc:h2:mem:testdb
+    username: sa
+    password: 
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+    open-in-view: false
+
+# Bitcoin相关配置
+bitcoin:
+  network: testnet
+  blockchain-api: https://blockchain.info
+  scan-interval: 30
+  confirmations: 6
+  utxo-lock-timeout: 30
+
+# 定时任务配置
+scheduler:
+  block-scan:
+    enabled: false  # 测试时禁用定时任务
+  withdrawal:
+    enabled: false
+  collection:
+    enabled: false
+
+security:
+  root-key-password: ${ROOT_KEY_PASSWORD:default_password_123}
+  encryption:
+    password: test_wallet_password
+  hsm:
+    enabled: false
+    provider: softhsm
+
+# 钱包配置
+wallet:
+  supported-coins: btc,ltc,dash,doge
+  change-address:
+    use-hot-wallet: true
+  hot-wallet:
+    address-index: 0
+
+# 币种配置
+coins:
+  btc:
+    name: Bitcoin
+    symbol: BTC
+    coin-type:
+      mainnet: 0
+      testnet: 1
+    hrp-prefix:
+      mainnet: bc
+      testnet: tb
+  ltc:
+    name: Litecoin
+    symbol: LTC
+    coin-type:
+      mainnet: 2
+      testnet: 1
+    hrp-prefix:
+      mainnet: lt
+      testnet: tlt
+  dash:
+    name: Dash
+    symbol: DASH
+    coin-type:
+      mainnet: 5
+      testnet: 1
+    hrp-prefix:
+      mainnet: dash
+      testnet: tdash
+  doge:
+    name: Dogecoin
+    symbol: DOGE
+    coin-type:
+      mainnet: 3
+      testnet: 1
+    hrp-prefix:
+      mainnet: doge
+      testnet: tdge
+
+monitoring:
+  hot-wallet-alert-threshold: 1.0
+  task-delay-alert-threshold: 300
+
+logging:
+  level:
+    com.btc: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"

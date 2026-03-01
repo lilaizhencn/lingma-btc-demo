@@ -1,0 +1,165 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://192.168.1.217:5432/testdb1
+    username: test
+    password: 123456
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  # Kafka配置
+  kafka:
+    bootstrap-servers: 192.168.1.217:9092
+    topic:
+      block-data: bitcoin-block-data
+    consumer:
+      group-id: btc-block-processor
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    producer:
+      acks: all
+      retries: 3
+
+# Bitcoin配置
+bitcoin:
+  network: testnet  # mainnet, testnet, regtest
+  # 主网/测试网一键切换开关
+  network-switch:
+    enabled: true  # 是否启用网络切换功能
+    default-network: testnet  # 默认网络
+  node:
+    rpc:
+      url: http://localhost:18332
+      username: rpcuser
+      password: rpcpassword
+  fee:
+    min-rate: 1000  # 最小手续费率 (satoshis/kB)
+    max-rate: 100000  # 最大手续费率 (satoshis/kB)
+    default-rate: 5000  # 默认手续费率 (satoshis/kB)
+
+# Blockchain API配置
+blockchain:
+  api:
+    # blockchain.info - 用于主网
+    blockchain-info:
+      base-url: https://blockchain.info
+    # mempool.space - 用于测试网(testnet4)
+    mempool:
+      base-url: https://mempool.space
+      api-key: 842345de22e62a36c61e80fc895ee7b3
+  data:
+    storage-path: ./blockchain-data
+  required-confirmations: 6
+  reorg-depth: 6
+ 
+
+# 钱包配置
+wallet:
+  supported-coins: btc,ltc,dash,doge  # 支持的币种列表
+  change-address:
+    use-hot-wallet: true  # 找零使用热钱包地址
+  hot-wallet:
+    # 热钱包配置将在运行时动态生成
+    address-index: 0  # 热钱包地址索引
+
+# 安全配置
+security:
+  encryption:
+    password: ${WALLET_ENCRYPTION_PASSWORD:default_wallet_password}
+  hsm:
+    enabled: false  # 是否启用硬件安全模块
+    provider: softhsm  # HSM提供者
+  
+# 币种配置
+coins:
+  btc:  # Bitcoin
+    name: Bitcoin
+    symbol: BTC
+    coin-type:
+      mainnet: 0
+      testnet: 1
+    hrp-prefix:
+      mainnet: bc
+      testnet: tb
+    
+  ltc:  # Litecoin
+    name: Litecoin
+    symbol: LTC
+    coin-type:
+      mainnet: 2
+      testnet: 1
+    hrp-prefix:
+      mainnet: lt
+      testnet: tlt
+      
+  dash:  # Dash
+    name: Dash
+    symbol: DASH
+    coin-type:
+      mainnet: 5
+      testnet: 1
+    hrp-prefix:
+      mainnet: dash
+      testnet: tdash
+      
+  doge:  # Dogecoin
+    name: Dogecoin
+    symbol: DOGE
+    coin-type:
+      mainnet: 3
+      testnet: 1
+    hrp-prefix:
+      mainnet: doge
+      testnet: tdge
+
+# 定时任务配置
+scheduler:
+  block-scan:
+    enabled: true
+    cron: "0 */10 * * * ?"  # 每10分钟执行一次
+  withdrawal:
+    enabled: true
+    cron: "0 */5 * * * ?"  # 每5分钟执行一次
+  collection:
+    enabled: true
+    cron: "0 0 */1 * * ?"  # 每小时执行一次
+
+# 监控配置
+monitor:
+  balance:
+    threshold: 1.0  # 余额告警阈值 (BTC)
+    check-interval: 300000  # 检查间隔 (毫秒)
+  alert:
+    enabled: true
+    email:
+      enabled: true
+      smtp-host: smtp.gmail.com
+      smtp-port: 587
+      username: your-email@gmail.com
+      password: your-app-password
+    wechat:
+      enabled: false
+      webhook-url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key
+    dingtalk:
+      enabled: false
+      webhook-url: https://oapi.dingtalk.com/robot/send?access_token=your-token
+
+# 日志配置
+logging:
+  level:
+    com.btc: DEBUG
+    org.springframework: INFO
+    org.hibernate: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
