@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
@@ -14,20 +14,32 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Mempool.space API提供者实现
- * 用于测试网（testnet4）数据获取
- * API文档: https://mempool.space/testnet4/docs/
+ * Mempool.space API服务
+ * 用于获取比特币区块链数据
+ * API文档: https://mempool.space/docs/api
  */
-@Component
-public class MempoolSpaceProvider implements BlockchainApiProvider {
+@Service
+public class MempoolSpaceProvider {
     
     @Value("${blockchain.api.mempool.base-url:https://mempool.space}")
     private String baseUrl;
+    
+    @Value("${blockchain.api.mempool.network:testnet4}")
+    private String network;
     
     @Value("${blockchain.api.mempool.api-key:}")
     private String apiKey;
     
     private RestTemplate restTemplate;
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    
+    // 速率限制
+    private static final long RATE_LIMIT_DELAY_MS = 300;
+    private static final int MAX_RETRY_ATTEMPTS = 5;
+    private static final long RETRY_DELAY_MS = 5000;
+    
+    private volatile long lastApiCallTime = 0;
     
     /**
      * 初始化RestTemplate，添加API Key认证拦截器
@@ -46,46 +58,27 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         } else {
             LogUtil.info(this.getClass(), "Mempool.space 未配置API Key，使用公开访问");
         }
-    }
-    
-    private final ObjectMapper objectMapper = new ObjectMapper();
-    
-    // 速率限制
-    private static final long RATE_LIMIT_DELAY_MS = 300;
-    private static final int MAX_RETRY_ATTEMPTS = 5;
-    private static final long RETRY_DELAY_MS = 5000;
-    
-    private volatile long lastApiCallTime = 0;
-    
-    @Override
-    public String getProviderName() {
-        return "mempool.space";
-    }
-    
-    @Override
-    public String getSupportedNetwork() {
-        return "testnet";
-    }
-    
-    @Override
-    public boolean isApplicable(String network) {
-        // 支持testnet和testnet4
-        return "testnet".equalsIgnoreCase(network) || "testnet4".equalsIgnoreCase(network);
+        
+        LogUtil.info(this.getClass(), "Mempool.space 初始化完成，网络: " + network);
     }
     
     /**
      * 获取API路径前缀
-     * 测试网使用 /testnet4/api/
+     * 测试网使用 /testnet4/api/，主网使用 /api/
      */
     private String getApiPrefix() {
+        if ("mainnet".equalsIgnoreCase(network)) {
+            return baseUrl + "/api";
+        }
         return baseUrl + "/testnet4/api";
     }
     
-    @Override
+    /**
+     * 获取最新区块高度
+     */
     public long getLatestBlockHeight() {
         try {
             enforceRateLimit();
-            // GET /testnet4/api/blocks/tip/height
             String url = getApiPrefix() + "/blocks/tip/height";
             
             LogUtil.debug(this.getClass(), "请求最新区块高度: " + url);
@@ -102,7 +95,9 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         }
     }
     
-    @Override
+    /**
+     * 根据区块高度获取区块哈希
+     */
     public String getBlockHash(long blockHeight) {
         return getBlockHashWithRetry(blockHeight, 0);
     }
@@ -110,7 +105,6 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
     private String getBlockHashWithRetry(long blockHeight, int retryCount) {
         try {
             enforceRateLimit();
-            // GET /testnet4/api/block-height/:height
             String url = getApiPrefix() + "/block-height/" + blockHeight;
             
             LogUtil.debug(this.getClass(), "请求区块哈希: " + url);
@@ -137,10 +131,10 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         }
     }
     
-    @Override
+    /**
+     * 获取区块的交易列表
+     */
     public List<TransactionInfo> getBlockTransactions(String blockHash) {
-        // mempool.space API是分页接口，需要循环获取所有交易
-        // 每页返回25个交易，通过start_index参数获取下一页
         List<TransactionInfo> allTransactions = new ArrayList<>();
         int currentIndex = 0;
         int pageCount = 0;
@@ -151,7 +145,6 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
             List<TransactionInfo> pageTransactions = getBlockTransactionsPage(blockHash, currentIndex, 0);
             
             if (pageTransactions.isEmpty()) {
-                // 没有更多交易了
                 break;
             }
             
@@ -162,13 +155,10 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
                 "已获取第%d页，本页%d笔交易，累计%d笔交易", 
                 pageCount, pageTransactions.size(), allTransactions.size()));
             
-            // mempool.space每页最多返回25个交易
-            // 如果返回少于25个，说明已经是最后一页
             if (pageTransactions.size() < 25) {
                 break;
             }
             
-            // 更新索引获取下一页
             currentIndex += pageTransactions.size();
         }
         
@@ -180,14 +170,10 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
     
     /**
      * 获取单页区块交易
-     * @param blockHash 区块哈希
-     * @param startIndex 起始索引（0表示从第一笔开始）
-     * @param retryCount 重试次数
      */
     private List<TransactionInfo> getBlockTransactionsPage(String blockHash, int startIndex, int retryCount) {
         try {
             enforceRateLimit();
-            // GET /testnet4/api/block/:hash/txs[/:start_index]
             String url = getApiPrefix() + "/block/" + blockHash + "/txs";
             if (startIndex > 0) {
                 url += "/" + startIndex;
@@ -214,35 +200,62 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         }
     }
     
-    @Override
+    /**
+     * 获取区块完整数据JSON
+     * 调用 /block/:hash/txs 接口获取所有交易数据（包含完整的vin/vout）
+     */
     public String getBlockDataJson(String blockHash) {
         return getBlockDataJsonWithRetry(blockHash, 0);
     }
     
     private String getBlockDataJsonWithRetry(String blockHash, int retryCount) {
         try {
-            enforceRateLimit();
-            // 获取区块头信息
-            String headerUrl = getApiPrefix() + "/block/" + blockHash + "/header";
-            LogUtil.debug(this.getClass(), "请求区块头: " + headerUrl);
-            ResponseEntity<String> headerResponse = restTemplate.getForEntity(headerUrl, String.class);
+            List<String> allTxJsons = new ArrayList<>();
+            int currentIndex = 0;
+            int pageCount = 0;
             
-            // 获取区块交易列表
-            List<TransactionInfo> transactions = getBlockTransactions(blockHash);
+            LogUtil.info(this.getClass(), "开始获取区块完整交易数据: " + blockHash);
             
-            // 构建区块数据JSON
+            while (true) {
+                String pageJson = getBlockTransactionsRawJson(blockHash, currentIndex, 0);
+                
+                if (pageJson == null || pageJson.isEmpty()) {
+                    break;
+                }
+                
+                JsonNode txArray = objectMapper.readTree(pageJson);
+                if (!txArray.isArray() || txArray.isEmpty()) {
+                    break;
+                }
+                
+                for (JsonNode txNode : txArray) {
+                    allTxJsons.add(txNode.toString());
+                }
+                
+                pageCount++;
+                int pageSize = txArray.size();
+                LogUtil.debug(this.getClass(), String.format(
+                    "已获取第%d页，本页%d笔交易，累计%d笔交易", 
+                    pageCount, pageSize, allTxJsons.size()));
+                
+                if (pageSize < 25) {
+                    break;
+                }
+                
+                currentIndex += pageSize;
+            }
+            
+            LogUtil.info(this.getClass(), String.format(
+                "区块 %s 共获取 %d 笔交易，分 %d 页", blockHash, allTxJsons.size(), pageCount));
+            
+            // 构建最终的区块数据JSON
             StringBuilder jsonBuilder = new StringBuilder();
             jsonBuilder.append("{\"hash\":\"").append(blockHash).append("\",");
-            jsonBuilder.append("\"header\":").append(headerResponse.getBody()).append(",");
             jsonBuilder.append("\"txs\":[");
             
-            for (int i = 0; i < transactions.size(); i++) {
+            for (int i = 0; i < allTxJsons.size(); i++) {
                 if (i > 0) jsonBuilder.append(",");
-                TransactionInfo tx = transactions.get(i);
-                jsonBuilder.append("{\"txid\":\"").append(tx.txId()).append("\",");
-                jsonBuilder.append("\"fee\":").append(tx.fee()).append(",");
-                jsonBuilder.append("\"size\":").append(tx.size()).append(",");
-                jsonBuilder.append("\"vsize\":").append(tx.vsize()).append("}");
+                jsonBuilder.append(allTxJsons.get(i));
             }
             
             jsonBuilder.append("]}");
@@ -261,6 +274,50 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         }
     }
     
+    /**
+     * 获取单页区块交易的原始JSON字符串
+     */
+    private String getBlockTransactionsRawJson(String blockHash, int startIndex, int retryCount) {
+        try {
+            enforceRateLimit();
+            String url = getApiPrefix() + "/block/" + blockHash + "/txs";
+            if (startIndex > 0) {
+                url += "/" + startIndex;
+            }
+            
+            LogUtil.debug(this.getClass(), "请求区块交易页原始数据: " + url + " (startIndex=" + startIndex + ")");
+            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+            
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return response.getBody();
+            }
+            throw new RuntimeException("获取区块交易失败，HTTP状态码: " + response.getStatusCode());
+            
+        } catch (HttpClientErrorException.TooManyRequests e) {
+            LogUtil.warn(this.getClass(), "遇到429速率限制，重试次数: " + retryCount);
+            return handleRetryForRawJson(blockHash, startIndex, retryCount);
+            
+        } catch (Exception e) {
+            if (retryCount < MAX_RETRY_ATTEMPTS && shouldRetry(e)) {
+                LogUtil.warn(this.getClass(), "获取区块交易原始数据失败，重试次数: " + retryCount);
+                return handleRetryForRawJson(blockHash, startIndex, retryCount);
+            }
+            throw new RuntimeException("获取区块交易原始数据失败: " + blockHash, e);
+        }
+    }
+    
+    // ===== 重试处理方法 =====
+    
+    private String handleRetryForRawJson(String blockHash, int startIndex, int retryCount) {
+        try {
+            Thread.sleep(RETRY_DELAY_MS * (retryCount + 1));
+            return getBlockTransactionsRawJson(blockHash, startIndex, retryCount + 1);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("重试过程中被中断", ie);
+        }
+    }
+    
     private List<TransactionInfo> handleRetryForTransactionsPage(String blockHash, int startIndex, int retryCount) {
         try {
             Thread.sleep(RETRY_DELAY_MS * (retryCount + 1));
@@ -270,7 +327,6 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
             throw new RuntimeException("重试过程中被中断", ie);
         }
     }
-
     
     private String handleRetryForBlockData(String blockHash, int retryCount) {
         try {
@@ -291,6 +347,8 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
             throw new RuntimeException("重试过程中被中断", ie);
         }
     }
+    
+    // ===== 解析方法 =====
     
     private List<TransactionInfo> parseTransactions(String json) {
         try {
@@ -364,6 +422,8 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
         return new TxOutput(scriptPubKey, address, value);
     }
     
+    // ===== 工具方法 =====
+    
     private synchronized void enforceRateLimit() {
         long currentTime = System.currentTimeMillis();
         long timeSinceLastCall = currentTime - lastApiCallTime;
@@ -384,4 +444,39 @@ public class MempoolSpaceProvider implements BlockchainApiProvider {
                e instanceof java.net.UnknownHostException ||
                e instanceof HttpServerErrorException;
     }
+    
+    // ===== 数据记录类 =====
+    
+    /**
+     * 交易信息
+     */
+    public record TransactionInfo(
+        String txId,
+        long fee,
+        int size,
+        int vsize,
+        List<TxInput> inputs,
+        List<TxOutput> outputs
+    ) {}
+    
+    /**
+     * 交易输入
+     */
+    public record TxInput(
+        String txId,
+        int vout,
+        String scriptSig,
+        long sequence,
+        String address,
+        long value
+    ) {}
+    
+    /**
+     * 交易输出
+     */
+    public record TxOutput(
+        String scriptPubKey,
+        String address,
+        long value
+    ) {}
 }

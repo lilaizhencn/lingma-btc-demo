@@ -128,7 +128,7 @@ coins:
 scheduler:
   block-scan:
     enabled: true
-    cron: "0 */10 * * * ?"  # 每10分钟执行一次
+    cron: "0 */3 * * * ?"  # 每10分钟执行一次
   withdrawal:
     enabled: true
     cron: "0 */5 * * * ?"  # 每5分钟执行一次

@@ -22,7 +22,7 @@ import java.util.Optional;
 /**
  * 区块数据获取服务
  * 负责下载区块数据，保存到本地文件，并发送到Kafka
- * 支持根据网络配置自动选择API提供者（blockchain.info主网，mempool.space测试网）
+ * 使用 mempool.space API 获取数据
  */
 @Service
 public class BlockDataFetchService {
@@ -30,7 +30,7 @@ public class BlockDataFetchService {
     private final BtcBlockSyncRecordRepository syncRecordRepository;
     private final BtcSyncStatusRepository syncStatusRepository;
     private final BlockDataKafkaProducer kafkaProducer;
-    private final BlockchainApiManager apiManager;
+    private final MempoolSpaceProvider mempoolSpaceProvider;
     private final ObjectMapper objectMapper = new ObjectMapper();
     
     @Value("${blockchain.data.storage-path:./blockchain-data}")
@@ -41,44 +41,39 @@ public class BlockDataFetchService {
             BtcBlockSyncRecordRepository syncRecordRepository,
             BtcSyncStatusRepository syncStatusRepository,
             BlockDataKafkaProducer kafkaProducer,
-            BlockchainApiManager apiManager) {
+            MempoolSpaceProvider mempoolSpaceProvider) {
         this.syncRecordRepository = syncRecordRepository;
         this.syncStatusRepository = syncStatusRepository;
         this.kafkaProducer = kafkaProducer;
-        this.apiManager = apiManager;
+        this.mempoolSpaceProvider = mempoolSpaceProvider;
     }
     
     /**
      * 初始化数据存储目录
-     * 在Spring完成属性注入后调用
      */
     @jakarta.annotation.PostConstruct
     public void init() {
-        // 确保数据存储目录存在
         File storageDir = new File(dataStoragePath);
         if (!storageDir.exists()) {
             storageDir.mkdirs();
         }
         LogUtil.info(this.getClass(), "区块数据存储目录初始化完成: " + storageDir.getAbsolutePath());
-        LogUtil.info(this.getClass(), "使用API提供者: " + apiManager.getCurrentProviderName() + 
-                    ", 当前网络: " + apiManager.getCurrentNetwork());
     }
 
     
     /**
      * 执行区块数据同步
-     * 定时任务调用此方法
      */
     @Transactional
     public void syncBlockData() {
-        LogUtil.info(this.getClass(), "开始执行区块数据同步... [API提供者: " + apiManager.getCurrentProviderName() + "]");
+        LogUtil.info(this.getClass(), "开始执行区块数据同步...");
         
         try {
             // 获取或创建同步状态
             BtcSyncStatus syncStatus = getOrCreateSyncStatus();
             
-            // 获取最新区块高度（根据当前网络自动选择API）
-            long networkHeight = apiManager.getLatestBlockHeight();
+            // 获取最新区块高度
+            long networkHeight = mempoolSpaceProvider.getLatestBlockHeight();
             syncStatus.setNetworkLatestHeight(networkHeight);
             
             // 获取需要同步的区块范围
@@ -90,12 +85,12 @@ public class BlockDataFetchService {
                 return;
             }
             
-            // 每次最多同步100个区块
-            long endHeight = Math.min(startHeight + 99, networkHeight);
+            // 每次最多同步10个区块
+            long endHeight = Math.min(startHeight + 10, networkHeight);
             
             LogUtil.info(this.getClass(), String.format(
-                "同步区块范围: %d - %d, 网络最新高度: %d, 网络: %s", 
-                startHeight, endHeight, networkHeight, apiManager.getCurrentNetwork()));
+                "同步区块范围: %d - %d, 网络最新高度: %d", 
+                startHeight, endHeight, networkHeight));
             
             // 逐个获取区块数据
             for (long height = startHeight; height <= endHeight; height++) {
@@ -145,19 +140,21 @@ public class BlockDataFetchService {
         syncRecordRepository.save(record);
         
         try {
-            // 通过API管理器获取区块数据（自动选择正确的API）
-            String blockHash = apiManager.getBlockHash(blockHeight);
-            String rawJson = apiManager.getBlockDataJson(blockHash);
-            List<BlockchainApiProvider.TransactionInfo> transactions = apiManager.getBlockTransactions(blockHash);
+            // 获取区块数据
+            String blockHash = mempoolSpaceProvider.getBlockHash(blockHeight);
+            String rawJson = mempoolSpaceProvider.getBlockDataJson(blockHash);
+            List<MempoolSpaceProvider.TransactionInfo> transactions = mempoolSpaceProvider.getBlockTransactions(blockHash);
             
             // 解析时间戳
             long timestamp = System.currentTimeMillis() / 1000;
             try {
                 JsonNode root = objectMapper.readTree(rawJson);
-                if (root.has("time")) {
-                    timestamp = root.get("time").asLong();
-                } else if (root.has("header") && root.get("header").has("time")) {
-                    timestamp = root.get("header").get("time").asLong();
+                // 从第一笔交易获取时间
+                if (root.has("txs") && root.get("txs").isArray() && root.get("txs").size() > 0) {
+                    JsonNode firstTx = root.get("txs").get(0);
+                    if (firstTx.has("status") && firstTx.get("status").has("block_time")) {
+                        timestamp = firstTx.get("status").get("block_time").asLong();
+                    }
                 }
             } catch (Exception e) {
                 LogUtil.warn(this.getClass(), "解析区块时间戳失败，使用当前时间");
@@ -228,7 +225,7 @@ public class BlockDataFetchService {
         
         // 创建新的同步状态
         BtcSyncStatus status = new BtcSyncStatus();
-        status.setSyncedBlockHeight(0L);
+        status.setSyncedBlockHeight(124390L);
         status.setNetworkLatestHeight(0L);
         status.setBehindBlocks(0L);
         status.setSyncState(BtcSyncStatus.SyncState.RUNNING);

@@ -139,7 +139,7 @@ public class HDWalletManager {
         
         DeterministicKey purposeKey = HDKeyDerivation.deriveChildKey(rootKey, 44 | 0x80000000);
         DeterministicKey coinTypeKey = HDKeyDerivation.deriveChildKey(purposeKey, coinType | 0x80000000);
-        DeterministicKey accountKey = HDKeyDerivation.deriveChildKey(coinTypeKey, 0 | 0x80000000);
+        DeterministicKey accountKey = HDKeyDerivation.deriveChildKey(coinTypeKey, 0x80000000);
         DeterministicKey changeKey = HDKeyDerivation.deriveChildKey(accountKey, 0);
         DeterministicKey addressKey = HDKeyDerivation.deriveChildKey(changeKey, 0);
         
@@ -237,6 +237,12 @@ public class HDWalletManager {
      * Bech32编码核心实现
      */
     private String bech32Encode(String hrp, byte[] data) {
+        // Bech32标准字符集 (BIP173规范定义)
+        // 包含32个字符，用于表示5位二进制值(0-31)
+        // 设计原则：排除了容易混淆的字符(1、b、i、o、0)，避免视觉歧义
+        // 字符与值对应关系: 0=q, 1=p, 2=z, 3=r, 4=y, 5=9, 6=x, 7=8, 8=g, 9=f, 10=2, 
+        //                  11=t, 12=v, 13=d, 14=w, 15=0, 16=s, 17=3, 18=j, 19=n, 20=5,
+        //                  21=4, 22=k, 23=h, 24=c, 25=e, 26=6, 27=m, 28=u, 29=a, 30=7, 31=l
         char[] charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l".toCharArray();
         
         int[] data5bit = convertTo5BitArray(data);
@@ -490,7 +496,11 @@ public class HDWalletManager {
             System.out.println("\n========== 派生地址测试 ==========");
             String derivedAddress = walletManager.deriveRootAddress(1);  // BTC测试网 coin_type=1
             System.out.println("   派生地址 m/44'/1'/0'/0/0: " + derivedAddress);
-            
+
+
+            System.out.println("\n========== 派生其他地址测试 用户为 1  index 为0 ==========");
+            String derivedAddress2 = walletManager.deriveAddress(1,1,0,0);  // BTC测试网 coin_type=1
+            System.out.println("   派生地址 m/44'/1'/1'/0/0: " + derivedAddress2);
             System.out.println("\n========== 测试完成 ==========");
             
         } catch (Exception e) {

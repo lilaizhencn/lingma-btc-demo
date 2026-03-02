@@ -72,15 +72,18 @@ public class BlockDataKafkaConsumer {
         LogUtil.info(this.getClass(), "收到区块数据: topic=" + topic + ", key=" + key);
         
         try {
-            // 查找同步记录
+            // 查找同步记录，如果不存在则创建新记录
             Optional<BtcBlockSyncRecord> recordOpt = syncRecordRepository.findByBlockHeight(blockHeight);
+            BtcBlockSyncRecord record;
             if (recordOpt.isEmpty()) {
-                LogUtil.warn(this.getClass(), "未找到区块同步记录: " + blockHeight);
-                acknowledgment.acknowledge();
-                return;
+                LogUtil.warn(this.getClass(), "未找到区块同步记录，创建新记录: " + blockHeight);
+                record = new BtcBlockSyncRecord();
+                record.setBlockHeight(blockHeight);
+                record.setSyncStatus(BtcBlockSyncRecord.SyncStatus.SENT);
+                record = syncRecordRepository.save(record);
+            } else {
+                record = recordOpt.get();
             }
-            
-            BtcBlockSyncRecord record = recordOpt.get();
             
             // 检查是否已处理
             if (record.getProcessStatus() == BtcBlockSyncRecord.ProcessStatus.COMPLETED) {
@@ -131,12 +134,26 @@ public class BlockDataKafkaConsumer {
     private int processBlockTransactions(JsonNode blockNode, long blockHeight) {
         int processedCount = 0;
         
-        if (!blockNode.has("tx") || !blockNode.get("tx").isArray()) {
+        // 兼容两种格式: "tx" (blockchain.info) 或 "txs" (mempool.space)
+        String txFieldName = blockNode.has("txs") ? "txs" : "tx";
+        if (!blockNode.has(txFieldName) || !blockNode.get(txFieldName).isArray()) {
+            LogUtil.warn(this.getClass(), "区块数据中没有交易列表");
             return processedCount;
         }
         
-        // 获取区块时间
-        long timestamp = blockNode.has("time") ? blockNode.get("time").asLong() : System.currentTimeMillis() / 1000;
+        // 获取区块时间 - 兼容多种时间字段格式
+        long timestamp = System.currentTimeMillis() / 1000;
+        if (blockNode.has("time")) {
+            timestamp = blockNode.get("time").asLong();
+        } else if (blockNode.has("header") && blockNode.get("header").has("time")) {
+            timestamp = blockNode.get("header").get("time").asLong();
+        }
+        // 从第一笔交易获取时间（mempool.space格式）
+        JsonNode firstTx = blockNode.get(txFieldName).get(0);
+        if (firstTx != null && firstTx.has("status") && firstTx.get("status").has("block_time")) {
+            timestamp = firstTx.get("status").get("block_time").asLong();
+        }
+        
         LocalDateTime blockTime = LocalDateTime.ofInstant(
             java.time.Instant.ofEpochSecond(timestamp),
             ZoneId.systemDefault()
@@ -147,9 +164,16 @@ public class BlockDataKafkaConsumer {
         String hotWalletAddress = hotWalletList.isEmpty() ? "" : hotWalletList.getFirst().getAddress();
         
         // 处理每笔交易
-        for (JsonNode txNode : blockNode.get("tx")) {
-            if (txNode.has("hash")) {
-                String txHash = txNode.get("hash").asText();
+        for (JsonNode txNode : blockNode.get(txFieldName)) {
+            // 兼容两种格式: "txid" (mempool.space) 或 "hash" (blockchain.info)
+            String txHash = null;
+            if (txNode.has("txid")) {
+                txHash = txNode.get("txid").asText();
+            } else if (txNode.has("hash")) {
+                txHash = txNode.get("hash").asText();
+            }
+            
+            if (txHash != null) {
                 processTransaction(txHash, txNode, blockHeight, blockTime, hotWalletAddress);
                 processedCount++;
             }
@@ -183,14 +207,36 @@ public class BlockDataKafkaConsumer {
     
     /**
      * 解析交易输入
+     * 兼容两种格式:
+     * - mempool.space: "vin" 字段，包含 txid, vout, prevout
+     * - blockchain.info: "inputs" 字段，包含 prev_out
      */
     private List<TransactionInput> parseInputs(JsonNode txNode) {
-        if (!txNode.has("inputs") || !txNode.get("inputs").isArray()) {
-            return new ArrayList<>();
+        List<TransactionInput> inputs = new ArrayList<>();
+        
+        // mempool.space 格式: vin
+        if (txNode.has("vin") && txNode.get("vin").isArray()) {
+            int index = 0;
+            for (JsonNode vinNode : txNode.get("vin")) {
+                String prevTxHash = "coinbase";
+                int prevOutputIndex = 0;
+                
+                if (vinNode.has("txid")) {
+                    prevTxHash = vinNode.get("txid").asText();
+                }
+                if (vinNode.has("vout")) {
+                    prevOutputIndex = vinNode.get("vout").asInt();
+                }
+                
+                inputs.add(new TransactionInput(prevTxHash, prevOutputIndex));
+                index++;
+            }
+            return inputs;
         }
         
-        return StreamSupport.stream(txNode.get("inputs").spliterator(), false)
-            .map(inputNode -> {
+        // blockchain.info 格式: inputs
+        if (txNode.has("inputs") && txNode.get("inputs").isArray()) {
+            for (JsonNode inputNode : txNode.get("inputs")) {
                 String prevTxHash = "coinbase";
                 int prevOutputIndex = 0;
                 
@@ -203,27 +249,48 @@ public class BlockDataKafkaConsumer {
                         prevTxHash = String.valueOf(prevOut.get("tx_index").asLong());
                     }
                 }
-                return new TransactionInput(prevTxHash, prevOutputIndex);
-            })
-            .collect(Collectors.toList());
+                inputs.add(new TransactionInput(prevTxHash, prevOutputIndex));
+            }
+        }
+        
+        return inputs;
     }
     
     /**
      * 解析交易输出
+     * 兼容两种格式:
+     * - mempool.space: "vout" 字段，包含 n, scriptpubkey_address, value
+     * - blockchain.info: "out" 字段，包含 n, addr, value
      */
     private List<TransactionOutput> parseOutputs(JsonNode txNode) {
-        if (!txNode.has("out") || !txNode.get("out").isArray()) {
-            return new ArrayList<>();
+        List<TransactionOutput> outputs = new ArrayList<>();
+        
+        // mempool.space 格式: vout
+        if (txNode.has("vout") && txNode.get("vout").isArray()) {
+            for (JsonNode voutNode : txNode.get("vout")) {
+                int index = voutNode.has("n") ? voutNode.get("n").asInt() : 0;
+                String address = "";
+                // mempool.space 使用 scriptpubkey_address
+                if (voutNode.has("scriptpubkey_address")) {
+                    address = voutNode.get("scriptpubkey_address").asText();
+                }
+                long amount = voutNode.has("value") ? voutNode.get("value").asLong() : 0L;
+                outputs.add(new TransactionOutput(index, address, amount));
+            }
+            return outputs;
         }
         
-        return StreamSupport.stream(txNode.get("out").spliterator(), false)
-            .map(outputNode -> {
+        // blockchain.info 格式: out
+        if (txNode.has("out") && txNode.get("out").isArray()) {
+            for (JsonNode outputNode : txNode.get("out")) {
                 int index = outputNode.has("n") ? outputNode.get("n").asInt() : 0;
                 String address = outputNode.has("addr") ? outputNode.get("addr").asText() : "";
                 long amount = outputNode.has("value") ? outputNode.get("value").asLong() : 0L;
-                return new TransactionOutput(index, address, amount);
-            })
-            .collect(Collectors.toList());
+                outputs.add(new TransactionOutput(index, address, amount));
+            }
+        }
+        
+        return outputs;
     }
     
     /**
