@@ -3,9 +3,13 @@ package com.btc.controller;
 import com.btc.entity.BtcAddress;
 import com.btc.entity.BtcWithdrawal;
 import com.btc.service.AddressManagementService;
+import com.btc.service.BlockDataKafkaProducer;
 import com.btc.service.WithdrawalService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.HashMap;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/btc")
@@ -14,10 +18,15 @@ public class BitcoinController {
     private final AddressManagementService addressService;
     
     private final WithdrawalService withdrawalService;
+    
+    private final BlockDataKafkaProducer kafkaProducer;
 
-    public BitcoinController(AddressManagementService addressService, WithdrawalService withdrawalService) {
+    public BitcoinController(AddressManagementService addressService, 
+                            WithdrawalService withdrawalService,
+                            BlockDataKafkaProducer kafkaProducer) {
         this.addressService = addressService;
         this.withdrawalService = withdrawalService;
+        this.kafkaProducer = kafkaProducer;
     }
 
     /**
@@ -129,5 +138,43 @@ public class BitcoinController {
         } catch (Exception e) {
             return ResponseEntity.badRequest().body("扫描失败: " + e.getMessage());
         }
+    }
+    
+    /**
+     * 测试 Kafka 发送消息
+     */
+    @PostMapping("/kafka/test")
+    public ResponseEntity<Map<String, Object>> testKafkaSend(
+            @RequestParam(defaultValue = "test-key") String key,
+            @RequestParam(defaultValue = "test-message") String message) {
+        try {
+            String messageId = kafkaProducer.sendBlockData(Long.parseLong(key.replaceAll("[^0-9]", "1")), 
+                "{\"test\": true, \"message\": \"" + message + "\", \"timestamp\": " + System.currentTimeMillis() + "}");
+            
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", true);
+            result.put("messageId", messageId);
+            result.put("key", key);
+            result.put("topic", "bitcoin-block-data");
+            
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("error", e.getMessage());
+            return ResponseEntity.internalServerError().body(result);
+        }
+    }
+    
+    /**
+     * Kafka 状态检查
+     */
+    @GetMapping("/kafka/status")
+    public ResponseEntity<Map<String, Object>> kafkaStatus() {
+        Map<String, Object> status = new HashMap<>();
+        status.put("bootstrapServers", "192.168.1.217:9092");
+        status.put("topic", "bitcoin-block-data");
+        status.put("consumerGroup", "btc-block-processor");
+        return ResponseEntity.ok(status);
     }
 }

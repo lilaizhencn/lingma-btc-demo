@@ -4,6 +4,7 @@ import com.btc.service.BlockDataFetchService;
 import com.btc.service.BlockScanningService;
 import com.btc.service.WithdrawalService;
 import com.btc.util.LogUtil;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -42,7 +43,8 @@ public class BitcoinScheduler {
      * 从blockchain.info下载区块数据，保存到本地文件，发送到Kafka
      * Kafka消费者自动消费数据进行业务处理
      */
-    @Scheduled(cron = "${scheduler.block-scan.cron:0 */10 * * * ?}")
+    @Scheduled(cron = "${scheduler.block-scan.cron:0 */1 * * * ?}")
+//    @PostConstruct
     public void syncBlockData() {
         if (!blockScanEnabled) {
             return;

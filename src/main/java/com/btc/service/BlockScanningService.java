@@ -455,76 +455,190 @@ public class BlockScanningService {
     
     /**
      * 更新充值确认状态
-     * 达到requiredConfirmations确认数后最终入账
+     * 
+     * 确认数计算规则：当前链上最新区块高度 - 交易所在区块高度 + 1
+     * 
+     * 流程说明：
+     * 1. 扫描到新区块时，发现交易输出地址存在于用户地址列表中
+     * 2. 立即生成充值记录，状态置为PENDING（待确认）
+     * 3. 此时资产不变，不增加地址可用余额
+     * 4. 每次处理新区块时更新待确认订单的确认数
+     * 5. 达到requiredConfirmations确认数后：
+     *    - 更新订单为COMPLETED（已完成）状态
+     *    - 给用户地址增加余额
+     * 6. 已达到确认数的订单不再更新
      */
     public void updateDepositConfirmations() {
         long currentHeight = getCurrentNetworkHeight();
         
+        // 只查询PENDING状态的充值记录
         List<BtcDeposit> pendingDeposits = depositRepository.findByStatus(BtcDeposit.DepositStatus.PENDING);
         
         for (BtcDeposit deposit : pendingDeposits) {
+            if (deposit.getBlockHeight() == null) {
+                continue; // 没有区块高度，跳过（可能是内存池交易）
+            }
+            
+            // 计算确认数：当前高度 - 交易所在区块高度 + 1
             int confirmations = (int)(currentHeight - deposit.getBlockHeight()) + 1;
-            deposit.setConfirmations(confirmations);
             
             if (confirmations >= requiredConfirmations) {
-                completeDeposit(deposit);
+                // 达到确认数要求，完成充值入账
+                completeDeposit(deposit, confirmations);
+                LogUtil.info(this.getClass(), String.format(
+                    "充值确认完成: txHash=%s, 确认数=%d, 金额=%d 聪",
+                    deposit.getTxHash(), confirmations, deposit.getAmount()));
             } else {
+                // 更新确认数，但状态保持PENDING
+                deposit.setConfirmations(confirmations);
+                deposit.setUpdatedAt(LocalDateTime.now());
                 depositRepository.save(deposit);
+                LogUtil.debug(this.getClass(), String.format(
+                    "充值确认数更新: txHash=%s, 确认数=%d/%d",
+                    deposit.getTxHash(), confirmations, requiredConfirmations));
             }
         }
         
-        // 处理已确认但未完成的充值
-        List<BtcDeposit> confirmedDeposits = depositRepository.findByStatus(BtcDeposit.DepositStatus.CONFIRMED);
-        for (BtcDeposit deposit : confirmedDeposits) {
-            int confirmations = (int)(currentHeight - deposit.getBlockHeight()) + 1;
-            deposit.setConfirmations(confirmations);
-            if (confirmations >= requiredConfirmations) {
-                completeDeposit(deposit);
-            } else {
-                depositRepository.save(deposit);
-            }
-        }
+        // 注意：CONFIRMED状态的记录不再处理，因为我们使用PENDING->COMPLETED的两阶段状态
+        // 确认数达到要求后直接完成，不需要中间的CONFIRMED状态
     }
     
     /**
      * 完成充值（达到确认数后入账）
+     * @param deposit 充值记录
+     * @param confirmations 当前确认数
      */
-    private void completeDeposit(BtcDeposit deposit) {
+    private void completeDeposit(BtcDeposit deposit, int confirmations) {
         deposit.setStatus(BtcDeposit.DepositStatus.COMPLETED);
+        deposit.setConfirmations(confirmations);
         deposit.setCompletedAt(LocalDateTime.now());
+        deposit.setUpdatedAt(LocalDateTime.now());
         depositRepository.save(deposit);
         
-        // 更新地址余额
+        // 更新地址余额（只有完成确认后才增加余额）
         Optional<BtcAddress> addressOpt = addressRepository.findByAddress(deposit.getAddress());
         if (addressOpt.isPresent()) {
             BtcAddress address = addressOpt.get();
             address.setBalance(address.getBalance() + deposit.getAmount());
+            address.setUpdatedAt(LocalDateTime.now());
             addressRepository.save(address);
+            
+            LogUtil.info(this.getClass(), String.format(
+                "充值入账完成: txHash=%s, 地址=%s, 金额=%d 聪, 确认数=%d, 用户ID=%d",
+                deposit.getTxHash(), deposit.getAddress(), deposit.getAmount(), confirmations, deposit.getUserId()));
+        } else {
+            LogUtil.warn(this.getClass(), "充值入账失败：找不到地址 " + deposit.getAddress());
         }
-        
-        LogUtil.info(this.getClass(), "充值完成入账: " + deposit.getTxHash() + ":" + deposit.getOutputIndex() + 
-            ", 金额: " + deposit.getAmount() + " 聪, 确认数: " + deposit.getConfirmations());
     }
     
     /**
      * 更新提现确认状态
+     * 
+     * 确认数计算规则：当前链上最新区块高度 - 交易所在区块高度 + 1
+     * 
+     * 流程说明：
+     * 1. 提现申请时：冻结用户余额（从balance转移到frozenBalance）
+     * 2. 提现广播后：状态为BROADCASTED，等待确认
+     * 3. 每次处理新区块时更新BROADCASTED状态提现的确认数
+     * 4. 达到requiredConfirmations确认数后：
+     *    - 更新订单为COMPLETED（已完成）状态
+     *    - 从冻结余额中扣除（frozenBalance减少）
+     *    - 注意：余额在申请时已冻结，这里只需扣减冻结余额
+     * 5. 已达到确认数的订单不再更新
      */
     public void updateWithdrawalConfirmations() {
         long currentHeight = getCurrentNetworkHeight();
         
-        List<BtcWithdrawal> confirmedWithdrawals = withdrawalRepository.findByStatus(BtcWithdrawal.WithdrawalStatus.CONFIRMED);
+        // 查询BROADCASTED状态的提现记录（已广播但未确认）
+        List<BtcWithdrawal> broadcastedWithdrawals = withdrawalRepository
+            .findByStatus(BtcWithdrawal.WithdrawalStatus.BROADCASTED);
+        
+        for (BtcWithdrawal withdrawal : broadcastedWithdrawals) {
+            if (withdrawal.getBlockHeight() == null) {
+                continue; // 没有区块高度，跳过（可能还在内存池）
+            }
+            
+            // 计算确认数：当前高度 - 交易所在区块高度 + 1
+            int confirmations = (int)(currentHeight - withdrawal.getBlockHeight()) + 1;
+            
+            if (confirmations >= requiredConfirmations) {
+                // 达到确认数要求，完成提现
+                completeWithdrawal(withdrawal, confirmations);
+                LogUtil.info(this.getClass(), String.format(
+                    "提现确认完成: txHash=%s, 确认数=%d, 金额=%d 聪",
+                    withdrawal.getTxHash(), confirmations, withdrawal.getAmount()));
+            } else {
+                // 更新确认数，状态保持BROADCASTED
+                withdrawal.setConfirmations(confirmations);
+                withdrawal.setUpdatedAt(LocalDateTime.now());
+                withdrawalRepository.save(withdrawal);
+                LogUtil.debug(this.getClass(), String.format(
+                    "提现确认数更新: txHash=%s, 确认数=%d/%d",
+                    withdrawal.getTxHash(), confirmations, requiredConfirmations));
+            }
+        }
+        
+        // 处理CONFIRMED状态的记录（可能从其他途径更新）
+        List<BtcWithdrawal> confirmedWithdrawals = withdrawalRepository
+            .findByStatus(BtcWithdrawal.WithdrawalStatus.CONFIRMED);
         
         for (BtcWithdrawal withdrawal : confirmedWithdrawals) {
-            if (withdrawal.getBlockHeight() != null) {
-                int confirmations = (int)(currentHeight - withdrawal.getBlockHeight()) + 1;
+            if (withdrawal.getBlockHeight() == null) {
+                continue;
+            }
+            
+            int confirmations = (int)(currentHeight - withdrawal.getBlockHeight()) + 1;
+            
+            if (confirmations >= requiredConfirmations) {
+                completeWithdrawal(withdrawal, confirmations);
+            } else {
                 withdrawal.setConfirmations(confirmations);
-                
-                if (confirmations >= requiredConfirmations) {
-                    withdrawal.setStatus(BtcWithdrawal.WithdrawalStatus.COMPLETED);
-                    withdrawal.setCompletedAt(LocalDateTime.now());
-                }
+                withdrawal.setUpdatedAt(LocalDateTime.now());
                 withdrawalRepository.save(withdrawal);
             }
+        }
+    }
+    
+    /**
+     * 完成提现（达到确认数后扣减冻结余额）
+     * @param withdrawal 提现记录
+     * @param confirmations 当前确认数
+     */
+    private void completeWithdrawal(BtcWithdrawal withdrawal, int confirmations) {
+        withdrawal.setStatus(BtcWithdrawal.WithdrawalStatus.COMPLETED);
+        withdrawal.setConfirmations(confirmations);
+        withdrawal.setCompletedAt(LocalDateTime.now());
+        withdrawal.setUpdatedAt(LocalDateTime.now());
+        withdrawalRepository.save(withdrawal);
+        
+        // 从冻结余额中扣除
+        Long userId = withdrawal.getUserId();
+        Long totalAmount = withdrawal.getTotalAmount(); // 金额 + 手续费
+        
+        List<BtcAddress> userAddresses = addressRepository.findByUserId(userId);
+        long remainingToDeduct = totalAmount;
+        
+        for (BtcAddress address : userAddresses) {
+            if (remainingToDeduct <= 0) break;
+            
+            long frozenBalance = address.getFrozenBalance();
+            if (frozenBalance > 0) {
+                long deductAmount = Math.min(frozenBalance, remainingToDeduct);
+                address.setFrozenBalance(frozenBalance - deductAmount);
+                address.setUpdatedAt(LocalDateTime.now());
+                addressRepository.save(address);
+                remainingToDeduct -= deductAmount;
+                
+                LogUtil.info(this.getClass(), String.format(
+                    "提现扣减冻结余额: 地址=%s, 扣减=%d 聪, 剩余冻结=%d 聪",
+                    address.getAddress(), deductAmount, address.getFrozenBalance()));
+            }
+        }
+        
+        if (remainingToDeduct > 0) {
+            LogUtil.warn(this.getClass(), String.format(
+                "提现完成但冻结余额不足: 提现ID=%d, 未扣减金额=%d 聪",
+                withdrawal.getId(), remainingToDeduct));
         }
     }
     

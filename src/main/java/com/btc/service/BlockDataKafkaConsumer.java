@@ -5,25 +5,25 @@ import com.btc.repository.*;
 import com.btc.util.LogUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.support.Acknowledgment;
-import org.springframework.kafka.support.KafkaHeaders;
-import org.springframework.messaging.handler.annotation.Header;
-import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 /**
  * 区块数据Kafka消费者服务
- * 负责从Kafka消费区块数据，执行业务处理逻辑
+ * 使用 Kafka Client 原生 API 消费消息
  */
 @Service
 public class BlockDataKafkaConsumer {
@@ -35,8 +35,18 @@ public class BlockDataKafkaConsumer {
     private final BtcWithdrawalRepository withdrawalRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
     
+    @Value("${spring.kafka.bootstrap-servers:192.168.1.217:9092}")
+    private String bootstrapServers;
+    
+    @Value("${spring.kafka.topic.block-data:bitcoin-block-data}")
+    private String topicName;
+    
     @Value("${blockchain.required-confirmations:6}")
     private int requiredConfirmations;
+    
+    private KafkaConsumer<String, String> consumer;
+    private volatile boolean running = false;
+    private Thread consumerThread;
     
     @Autowired
     public BlockDataKafkaConsumer(
@@ -52,24 +62,109 @@ public class BlockDataKafkaConsumer {
         this.withdrawalRepository = withdrawalRepository;
     }
     
-    /**
-     * 消费区块数据
-     * 使用手动确认模式，确保消息处理成功后再提交offset
-     */
-    @KafkaListener(
-        topics = "${spring.kafka.topic.block-data:bitcoin-block-data}",
-        groupId = "btc-block-processor",
-        containerFactory = "kafkaListenerContainerFactory"
-    )
-    @Transactional
-    public void consumeBlockData(
-            @Payload String message,
-            @Header(KafkaHeaders.RECEIVED_KEY) String key,
-            @Header(KafkaHeaders.RECEIVED_TOPIC) String topic,
-            Acknowledgment acknowledgment) {
+    @PostConstruct
+    public void init() {
+        LogUtil.info(this.getClass(), "初始化 Kafka 消费者...");
         
-        long blockHeight = Long.parseLong(key);
-        LogUtil.info(this.getClass(), "收到区块数据: topic=" + topic + ", key=" + key);
+        // 配置消费者
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "btc-block-processor");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "1000");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "10");
+        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
+        props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "10000");
+        
+        // 创建消费者
+        consumer = new KafkaConsumer<>(props);
+        
+        // 订阅主题
+        consumer.subscribe(Collections.singletonList(topicName));
+        
+        LogUtil.info(this.getClass(), "Kafka 消费者已订阅主题: " + topicName);
+        
+        // 启动消费线程
+        startConsumerThread();
+    }
+    
+    /**
+     * 启动消费线程
+     */
+    private void startConsumerThread() {
+        running = true;
+        
+        consumerThread = new Thread(() -> {
+            LogUtil.info(this.getClass(), "Kafka 消费线程启动，开始轮询消息...");
+            
+            while (running) {
+                try {
+                    // 轮询消息
+                    ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(5));
+                    
+                    if (records.isEmpty()) {
+                        LogUtil.debug(this.getClass(), "本次轮询没有收到消息，继续轮询...");
+                        continue;
+                    }
+                    
+                    LogUtil.info(this.getClass(), "收到 " + records.count() + " 条消息");
+                    
+                    // 处理每条消息
+                    for (ConsumerRecord<String, String> record : records) {
+                        try {
+                            processMessage(record.key(), record.value(), record.topic(), record.partition(), record.offset());
+                        } catch (Exception e) {
+                            LogUtil.error(this.getClass(), "处理消息失败: key=" + record.key(), e);
+                        }
+                    }
+                    
+                    // 同步提交 offset
+                    consumer.commitSync();
+                    LogUtil.debug(this.getClass(), "Offset 已提交");
+                    
+                } catch (Exception e) {
+                    LogUtil.error(this.getClass(), "Kafka 消费异常", e);
+                    try {
+                        Thread.sleep(1000); // 等待1秒后重试
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            
+            LogUtil.info(this.getClass(), "Kafka 消费线程结束");
+        }, "kafka-consumer-thread");
+        
+        consumerThread.setDaemon(false);
+        consumerThread.start();
+        
+        LogUtil.info(this.getClass(), "Kafka 消费线程已启动");
+    }
+    
+    /**
+     * 处理单条消息
+     */
+    private void processMessage(String key, String message, String topic, int partition, long offset) {
+        LogUtil.info(this.getClass(), String.format(
+            "收到消息: topic=%s, partition=%d, offset=%d, key=%s",
+            topic, partition, offset, key));
+        
+        if (key == null || key.isEmpty()) {
+            LogUtil.warn(this.getClass(), "消息 key 为空，跳过处理");
+            return;
+        }
+        
+        long blockHeight;
+        try {
+            blockHeight = Long.parseLong(key);
+        } catch (NumberFormatException e) {
+            LogUtil.error(this.getClass(), "无法解析区块高度: " + key, e);
+            return;
+        }
         
         try {
             // 查找同步记录，如果不存在则创建新记录
@@ -88,7 +183,6 @@ public class BlockDataKafkaConsumer {
             // 检查是否已处理
             if (record.getProcessStatus() == BtcBlockSyncRecord.ProcessStatus.COMPLETED) {
                 LogUtil.debug(this.getClass(), "区块已处理，跳过: " + blockHeight);
-                acknowledgment.acknowledge();
                 return;
             }
             
@@ -109,9 +203,6 @@ public class BlockDataKafkaConsumer {
             
             LogUtil.info(this.getClass(), "区块数据处理完成: 高度=" + blockHeight + ", 处理交易数=" + processedCount);
             
-            // 确认消息
-            acknowledgment.acknowledge();
-            
         } catch (Exception e) {
             LogUtil.error(this.getClass(), "处理区块数据失败: " + blockHeight, e);
             
@@ -122,9 +213,6 @@ public class BlockDataKafkaConsumer {
                 record.setProcessedAt(LocalDateTime.now());
                 syncRecordRepository.save(record);
             });
-            
-            // 确认消息（避免重复消费）
-            acknowledgment.acknowledge();
         }
     }
     
@@ -207,16 +295,12 @@ public class BlockDataKafkaConsumer {
     
     /**
      * 解析交易输入
-     * 兼容两种格式:
-     * - mempool.space: "vin" 字段，包含 txid, vout, prevout
-     * - blockchain.info: "inputs" 字段，包含 prev_out
      */
     private List<TransactionInput> parseInputs(JsonNode txNode) {
         List<TransactionInput> inputs = new ArrayList<>();
         
         // mempool.space 格式: vin
         if (txNode.has("vin") && txNode.get("vin").isArray()) {
-            int index = 0;
             for (JsonNode vinNode : txNode.get("vin")) {
                 String prevTxHash = "coinbase";
                 int prevOutputIndex = 0;
@@ -229,7 +313,6 @@ public class BlockDataKafkaConsumer {
                 }
                 
                 inputs.add(new TransactionInput(prevTxHash, prevOutputIndex));
-                index++;
             }
             return inputs;
         }
@@ -258,9 +341,6 @@ public class BlockDataKafkaConsumer {
     
     /**
      * 解析交易输出
-     * 兼容两种格式:
-     * - mempool.space: "vout" 字段，包含 n, scriptpubkey_address, value
-     * - blockchain.info: "out" 字段，包含 n, addr, value
      */
     private List<TransactionOutput> parseOutputs(JsonNode txNode) {
         List<TransactionOutput> outputs = new ArrayList<>();
@@ -270,7 +350,6 @@ public class BlockDataKafkaConsumer {
             for (JsonNode voutNode : txNode.get("vout")) {
                 int index = voutNode.has("n") ? voutNode.get("n").asInt() : 0;
                 String address = "";
-                // mempool.space 使用 scriptpubkey_address
                 if (voutNode.has("scriptpubkey_address")) {
                     address = voutNode.get("scriptpubkey_address").asText();
                 }
@@ -303,18 +382,15 @@ public class BlockDataKafkaConsumer {
             return false;
         }
         
-        // 获取所有输出地址
         Set<String> outputAddresses = outputs.stream()
             .map(TransactionOutput::address)
             .filter(addr -> addr != null && !addr.isEmpty())
-            .collect(Collectors.toSet());
+            .collect(java.util.stream.Collectors.toSet());
         
-        // 归集交易：输出只有一个地址且是热钱包
         if (outputAddresses.size() != 1 || !outputAddresses.contains(hotWalletAddress)) {
             return false;
         }
         
-        // 检查输入是否来自用户地址
         for (TransactionInput input : inputs) {
             Optional<BtcUtxo> utxoOpt = utxoRepository.findByTxHashAndOutputIndex(
                 input.prevTxHash(), input.prevOutputIndex());
@@ -437,6 +513,29 @@ public class BlockDataKafkaConsumer {
                     });
             }
         }
+    }
+    
+    @PreDestroy
+    public void shutdown() {
+        LogUtil.info(this.getClass(), "关闭 Kafka 消费者...");
+        
+        running = false;
+        
+        if (consumerThread != null) {
+            consumerThread.interrupt();
+            try {
+                consumerThread.join(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        
+        if (consumer != null) {
+            consumer.wakeup();
+            consumer.close();
+        }
+        
+        LogUtil.info(this.getClass(), "Kafka 消费者已关闭");
     }
     
     // 内部记录类

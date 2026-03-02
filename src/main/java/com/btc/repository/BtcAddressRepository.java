@@ -17,6 +17,11 @@ public interface BtcAddressRepository extends JpaRepository<BtcAddress, Long> {
     Optional<BtcAddress> findByAddress(String address);
     
     /**
+     * 根据用户ID查找所有地址
+     */
+    List<BtcAddress> findByUserId(Long userId);
+    
+    /**
      * 根据用户ID和地址类型查找用户充值地址
      */
     List<BtcAddress> findByUserIdAndAddressType(Long userId, BtcAddress.AddressType addressType);

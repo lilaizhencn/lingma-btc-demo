@@ -790,17 +790,86 @@ public class WithdrawalService {
     
     /**
      * 冻结用户资金
+     * 
+     * 流程说明：
+     * 1. 用户提交提现申请时，将相应金额从balance转移到frozenBalance
+     * 2. balance代表可用余额，frozenBalance代表冻结余额
+     * 3. 提现完成后，从frozenBalance中扣除
+     * 4. 如果提现失败/拒绝，将frozenBalance转回balance
      */
     private void freezeUserFunds(BtcWithdrawal withdrawal) {
+        Long userId = withdrawal.getUserId();
+        Long totalAmount = withdrawal.getTotalAmount(); // 金额 + 手续费
+        
+        List<BtcAddress> userAddresses = addressManagementService.findUserAddresses(userId);
+        long remainingToFreeze = totalAmount;
+        
+        for (BtcAddress address : userAddresses) {
+            if (remainingToFreeze <= 0) break;
+            
+            long availableBalance = address.getBalance();
+            if (availableBalance > 0) {
+                long freezeAmount = Math.min(availableBalance, remainingToFreeze);
+                address.setBalance(availableBalance - freezeAmount);
+                address.setFrozenBalance(address.getFrozenBalance() + freezeAmount);
+                address.setUpdatedAt(LocalDateTime.now());
+                addressRepository.save(address);
+                remainingToFreeze -= freezeAmount;
+                
+                LogUtil.info(this.getClass(), String.format(
+                    "冻结用户资金: 地址=%s, 冻结=%d 聪, 可用余额=%d 聪, 冻结余额=%d 聪",
+                    address.getAddress(), freezeAmount, address.getBalance(), address.getFrozenBalance()));
+            }
+        }
+        
+        if (remainingToFreeze > 0) {
+            LogUtil.warn(this.getClass(), String.format(
+                "冻结资金不足: 用户ID=%d, 未冻结金额=%d 聪",
+                userId, remainingToFreeze));
+            throw new IllegalStateException("冻结资金失败：用户余额不足");
+        }
+        
         withdrawal.setFrozenAt(LocalDateTime.now());
-        // 实际项目中需要减少用户可用余额
     }
     
     /**
      * 解冻用户资金
+     * 
+     * 使用场景：
+     * 1. 提现申请被拒绝
+     * 2. 提现处理失败
+     * 3. 其他需要取消提现的情况
      */
     private void unfreezeUserFunds(BtcWithdrawal withdrawal) {
-        // 实际项目中需要恢复用户可用余额
+        Long userId = withdrawal.getUserId();
+        Long totalAmount = withdrawal.getTotalAmount();
+        
+        List<BtcAddress> userAddresses = addressManagementService.findUserAddresses(userId);
+        long remainingToUnfreeze = totalAmount;
+        
+        for (BtcAddress address : userAddresses) {
+            if (remainingToUnfreeze <= 0) break;
+            
+            long frozenBalance = address.getFrozenBalance();
+            if (frozenBalance > 0) {
+                long unfreezeAmount = Math.min(frozenBalance, remainingToUnfreeze);
+                address.setFrozenBalance(frozenBalance - unfreezeAmount);
+                address.setBalance(address.getBalance() + unfreezeAmount);
+                address.setUpdatedAt(LocalDateTime.now());
+                addressRepository.save(address);
+                remainingToUnfreeze -= unfreezeAmount;
+                
+                LogUtil.info(this.getClass(), String.format(
+                    "解冻用户资金: 地址=%s, 解冻=%d 聪, 可用余额=%d 聪, 冻结余额=%d 聪",
+                    address.getAddress(), unfreezeAmount, address.getBalance(), address.getFrozenBalance()));
+            }
+        }
+        
+        if (remainingToUnfreeze > 0) {
+            LogUtil.warn(this.getClass(), String.format(
+                "解冻资金不足: 用户ID=%d, 未解冻金额=%d 聪",
+                userId, remainingToUnfreeze));
+        }
     }
     
     /**

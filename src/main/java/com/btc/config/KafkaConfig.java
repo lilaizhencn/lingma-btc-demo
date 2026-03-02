@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
+import org.springframework.kafka.listener.ContainerProperties;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -64,7 +65,7 @@ public class KafkaConfig {
         // 自动提交偏移量
         config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         // 从最早的offset开始消费
-        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         return new DefaultKafkaConsumerFactory<>(config);
     }
     
@@ -78,6 +79,8 @@ public class KafkaConfig {
         factory.setConsumerFactory(consumerFactory());
         // 并发消费者数量
         factory.setConcurrency(3);
+        // 使用自动确认模式
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH);
         return factory;
     }
 

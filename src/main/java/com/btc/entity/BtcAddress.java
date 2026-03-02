@@ -80,6 +80,13 @@ public class BtcAddress {
     private Long balance = 0L;
     
     /**
+     * 冻结余额（单位：聪 satoshi）
+     * 用户申请提现时冻结的金额，提现完成后从冻结余额中扣除
+     */
+    @Column(name = "frozen_balance", nullable = false)
+    private Long frozenBalance = 0L;
+    
+    /**
      * 是否激活
      */
     @Column(name = "active", nullable = false)

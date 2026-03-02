@@ -86,7 +86,7 @@ public class BlockDataFetchService {
             }
             
             // 每次最多同步10个区块
-            long endHeight = Math.min(startHeight + 10, networkHeight);
+            long endHeight = Math.min(startHeight + 100, networkHeight);
             
             LogUtil.info(this.getClass(), String.format(
                 "同步区块范围: %d - %d, 网络最新高度: %d", 
@@ -225,7 +225,7 @@ public class BlockDataFetchService {
         
         // 创建新的同步状态
         BtcSyncStatus status = new BtcSyncStatus();
-        status.setSyncedBlockHeight(124390L);
+        status.setSyncedBlockHeight(0L);
         status.setNetworkLatestHeight(0L);
         status.setBehindBlocks(0L);
         status.setSyncState(BtcSyncStatus.SyncState.RUNNING);

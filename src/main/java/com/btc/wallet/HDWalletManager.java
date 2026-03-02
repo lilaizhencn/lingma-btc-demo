@@ -218,25 +218,32 @@ public class HDWalletManager {
     }
     
     /**
-     * Bech32编码实现
+     * Bech32编码实现 (BIP173规范)
+     * 对于P2WPKH地址:
+     * - witness version (0) 直接作为第一个5-bit值
+     * - witness program (20字节HASH160) 转换为5-bit数组
      */
     private String encodeBech32Address(byte[] pubkeyHash, String hrp) {
         try {
-            byte[] witnessProgram = new byte[pubkeyHash.length + 2];
-            witnessProgram[0] = 0x00;
-            witnessProgram[1] = (byte) pubkeyHash.length;
-            System.arraycopy(pubkeyHash, 0, witnessProgram, 2, pubkeyHash.length);
+            // 将pubkeyHash转换为5-bit数组
+            int[] program5bit = convertTo5BitArray(pubkeyHash);
             
-            return bech32Encode(hrp, witnessProgram);
+            // 数据 = [witness_version(0)] + [program_5bit...]
+            // witness version直接作为5-bit值使用，不进行字节转换
+            int[] data = new int[1 + program5bit.length];
+            data[0] = 0;  // witness version = 0 for P2WPKH
+            System.arraycopy(program5bit, 0, data, 1, program5bit.length);
+            
+            return bech32Encode(hrp, data);
         } catch (Exception e) {
             throw new RuntimeException("Bech32编码失败", e);
         }
     }
     
     /**
-     * Bech32编码核心实现
+     * Bech32编码核心实现 (接受5-bit int数组)
      */
-    private String bech32Encode(String hrp, byte[] data) {
+    private String bech32Encode(String hrp, int[] data5bit) {
         // Bech32标准字符集 (BIP173规范定义)
         // 包含32个字符，用于表示5位二进制值(0-31)
         // 设计原则：排除了容易混淆的字符(1、b、i、o、0)，避免视觉歧义
@@ -245,7 +252,6 @@ public class HDWalletManager {
         //                  21=4, 22=k, 23=h, 24=c, 25=e, 26=6, 27=m, 28=u, 29=a, 30=7, 31=l
         char[] charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l".toCharArray();
         
-        int[] data5bit = convertTo5BitArray(data);
         int[] checksum = createChecksum(hrp, data5bit);
         
         int[] combined = new int[data5bit.length + checksum.length];
@@ -464,8 +470,8 @@ public class HDWalletManager {
             HDWalletManager walletManager = new HDWalletManager();
             walletManager.initializeNetwork();
             
-            // 测试用的种子（从配置文件读取）
-            String testSeed = "30919cf1818b1ca23b46dd3a9df8503652d0bf046ded7dd6f57cfd6db2283699";
+            // 测试用的种子（从配置文件读取）- 2026年3月2日更新
+            String testSeed = "12701e2e6604ae8530b3eb5281f22f8f6545966819eb86bd417412fdc126814b";
             walletManager.configSeed = testSeed;
             
             // 从配置加载钱包
